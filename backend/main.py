@@ -138,62 +138,78 @@ class SubtitleExtractor:
         # 打印视频帧提取开始提示
         print(config.interface_config['Main']['StartProcessFrame'])
         # 创建一个字幕OCR识别进程
-        subtitle_ocr_process = self.start_subtitle_ocr_async()
-        if self.sub_area is not None:
-            if platform.system() in ['Windows', 'Linux']:
-                # 使用GPU且使用accurate模式时才开放此方法：
-                if config.USE_GPU and config.MODE_TYPE == 'accurate':
-                    self.extract_frame_by_det()
+        try:
+            subtitle_ocr_process = self.start_subtitle_ocr_async()
+            if self.sub_area is not None:
+                if platform.system() in ['Windows', 'Linux']:
+                    # 使用GPU且使用accurate模式时才开放此方法：
+                    if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                        self.extract_frame_by_det()
+                    else:
+                        self.extract_frame_by_vsf()
                 else:
-                    self.extract_frame_by_vsf()
+                    self.extract_frame_by_fps()
             else:
                 self.extract_frame_by_fps()
-        else:
-            self.extract_frame_by_fps()
 
-        # 往字幕OCR任务队列中，添加OCR识别任务结束标志
-        # 任务格式为：(total_frame_count总帧数, current_frame_no当前帧, dt_box检测框, rec_res识别结果, 当前帧时间， subtitle_area字幕区域)
-        self.subtitle_ocr_task_queue.put((self.frame_count, -1, None, None, None, None))
-        # 等待子线程完成
-        subtitle_ocr_process.join()
-        # 打印完成提示
-        print(config.interface_config['Main']['FinishProcessFrame'])
-        print(config.interface_config['Main']['FinishFindSub'])
+            # 往字幕OCR任务队列中，添加OCR识别任务结束标志
+            # 任务格式为：(total_frame_count总帧数, current_frame_no当前帧, dt_box检测框, rec_res识别结果, 当前帧时间， subtitle_area字幕区域)
+            self.subtitle_ocr_task_queue.put((self.frame_count, -1, None, None, None, None))
+            # 等待子线程完成
+            subtitle_ocr_process.join()
+            # 打印完成提示
+            print(config.interface_config['Main']['FinishProcessFrame'])
+            print(config.interface_config['Main']['FinishFindSub'])
 
-        if self.sub_area is None:
-            print(config.interface_config['Main']['StartDetectWaterMark'])
-            # 询问用户视频是否有水印区域
-            user_input = input(config.interface_config['Main']['checkWaterMark']).strip()
-            if user_input == 'y':
-                self.filter_watermark()
-                print(config.interface_config['Main']['FinishDetectWaterMark'])
+            if self.sub_area is None:
+                print(config.interface_config['Main']['StartDetectWaterMark'])
+                # 询问用户视频是否有水印区域
+                user_input = input(config.interface_config['Main']['checkWaterMark']).strip()
+                if user_input == 'y':
+                    self.filter_watermark()
+                    print(config.interface_config['Main']['FinishDetectWaterMark'])
+                else:
+                    print('-----------------------------')
+
+            if self.sub_area is None:
+                print(config.interface_config['Main']['StartDeleteNonSub'])
+                self.filter_scene_text()
+                print(config.interface_config['Main']['FinishDeleteNonSub'])
+
+            # 打印开始字幕生成提示
+            print(config.interface_config['Main']['StartGenerateSub'])
+            # 判断是否使用了vsf提取字幕
+            if self.use_vsf:
+                # 如果使用了vsf提取字幕，则使用vsf的字幕生成方法
+                self.generate_subtitle_file_vsf()
             else:
-                print('-----------------------------')
-
-        if self.sub_area is None:
-            print(config.interface_config['Main']['StartDeleteNonSub'])
-            self.filter_scene_text()
-            print(config.interface_config['Main']['FinishDeleteNonSub'])
-
-        # 打印开始字幕生成提示
-        print(config.interface_config['Main']['StartGenerateSub'])
-        # 判断是否使用了vsf提取字幕
-        if self.use_vsf:
-            # 如果使用了vsf提取字幕，则使用vsf的字幕生成方法
-            self.generate_subtitle_file_vsf()
-        else:
-            # 如果未使用vsf提取字幕，则使用常规字幕生成方法
-            self.generate_subtitle_file()
-        if config.WORD_SEGMENTATION:
-            reformat.execute(os.path.join(os.path.splitext(self.video_path)[0] + '.srt'), config.REC_CHAR_TYPE)
-        print(config.interface_config['Main']['FinishGenerateSub'], f"{round(time.time() - start_time, 2)}s")
-        self.update_progress(ocr=100, frame_extract=100)
-        self.isFinished = True
-        # 删除缓存文件
-        self.empty_cache()
-        self.lock.release()
-        if config.GENERATE_TXT:
-            self.srt2txt(os.path.join(os.path.splitext(self.video_path)[0] + '.srt'))
+                # 如果未使用vsf提取字幕，则使用常规字幕生成方法
+                self.generate_subtitle_file()
+        except Exception as e:
+            print(f"[ERROR] An exception occurred during processing: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to regular extraction if there's an error
+            self.generate_subtitle_file(force_generate=True)
+        finally:
+            if config.WORD_SEGMENTATION:
+                srt_file_path = os.path.join(os.path.splitext(self.video_path)[0] + '.srt')
+                if os.path.exists(srt_file_path):
+                    reformat.execute(srt_file_path, config.REC_CHAR_TYPE)
+                else:
+                    print(f"[WARNING] Subtitle file not found for word segmentation: {srt_file_path}")
+            print(config.interface_config['Main']['FinishGenerateSub'], f"{round(time.time() - start_time, 2)}s")
+            self.update_progress(ocr=100, frame_extract=100)
+            self.isFinished = True
+            # 删除缓存文件
+            self.empty_cache()
+            self.lock.release()
+            if config.GENERATE_TXT:
+                srt_file_path = os.path.join(os.path.splitext(self.video_path)[0] + '.srt')
+                if os.path.exists(srt_file_path):
+                    self.srt2txt(srt_file_path)
+                else:
+                    print(f"[WARNING] Subtitle file not found for TXT generation: {srt_file_path}")
 
     def extract_frame_by_fps(self):
         """
@@ -389,31 +405,41 @@ class SubtitleExtractor:
                 # 文件被清理了
                 except FileNotFoundError:
                     return
+                except Exception as e:
+                    print(f"[VSF] Error in count_process: {e}")
+                    return
 
         def vsf_output(out, ):
             duration_ms = (self.frame_count / self.fps) * 1000
             last_total_ms = 0
-            for line in iter(out.readline, b''):
-                line = line.decode("utf-8")
-                # print('line', line, type(line), line.startswith('Frame: '))
-                if line.startswith('Frame: '):
-                    line = line.replace("\n", "")
-                    line = line.replace("Frame: ", "")
-                    h, m, s, ms = line.split('__')[0].split('_')
-                    total_ms = int(ms) + int(s) * 1000 + int(m) * 60 * 1000 + int(h) * 60 * 60 * 1000
-                    if total_ms > last_total_ms:
-                        frame_no = int(total_ms / self.fps)
-                        task = (self.frame_count, frame_no, None, None, total_ms, self.default_subtitle_area)
-                        self.subtitle_ocr_task_queue.put(task)
-                    last_total_ms = total_ms
-                    if total_ms / duration_ms >= 1:
-                        self.update_progress(frame_extract=100)
-                        return
+            try:
+                for line in iter(out.readline, b''):
+                    line = line.decode("utf-8")
+                    # print('line', line, type(line), line.startswith('Frame: '))
+                    if line.startswith('Frame: '):
+                        line = line.replace("\n", "")
+                        line = line.replace("Frame: ", "")
+                        h, m, s, ms = line.split('__')[0].split('_')
+                        total_ms = int(ms) + int(s) * 1000 + int(m) * 60 * 1000 + int(h) * 60 * 60 * 1000
+                        if total_ms > last_total_ms:
+                            frame_no = int(total_ms / self.fps)
+                            task = (self.frame_count, frame_no, None, None, total_ms, self.default_subtitle_area)
+                            self.subtitle_ocr_task_queue.put(task)
+                        last_total_ms = total_ms
+                        if total_ms / duration_ms >= 1:
+                            self.update_progress(frame_extract=100)
+                            return
+                        else:
+                            self.update_progress(frame_extract=(total_ms / duration_ms) * 100)
                     else:
-                        self.update_progress(frame_extract=(total_ms / duration_ms) * 100)
-                else:
-                    print(line.strip())
-            out.close()
+                        print(line.strip())
+            except Exception as e:
+                print(f"[VSF] Error processing VSF output: {e}")
+            finally:
+                try:
+                    out.close()
+                except:
+                    pass
 
         # 删除缓存
         self.__delete_frame_cache()
@@ -423,6 +449,17 @@ class SubtitleExtractor:
         else:
             path_vsf = os.path.join(config.BASE_DIR, 'subfinder', 'linux', 'VideoSubFinderCli.run')
             os.chmod(path_vsf, 0o775)
+        
+        # 检查VSF executable是否存在
+        if not os.path.exists(path_vsf):
+            print(f"[VSF] VideoSubFinder executable not found at {path_vsf}. Falling back to other extraction method.")
+            # 尝试使用其他方法
+            if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                self.extract_frame_by_det()
+            else:
+                self.extract_frame_by_fps()
+            return
+        
         # ：图像上半部分所占百分比，取值【0-1】
         top_end = 1 - self.sub_area[0] / self.frame_height
         # bottom_end：图像下半部分所占百分比，取值【0-1】
@@ -445,8 +482,32 @@ class SubtitleExtractor:
             # 计算进度
             Thread(target=count_process, daemon=True).start()
             import subprocess
-            subprocess.run(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.vsf_running = False
+            try:
+                result = subprocess.run(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300) # 5分钟超时
+                if result.returncode != 0:
+                    print(f"[VSF] Command failed with return code {result.returncode}: {result.stderr.decode()}")
+                    # Fallback to using other extraction method
+                    if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                        self.extract_frame_by_det()
+                    else:
+                        self.extract_frame_by_fps()
+                    return
+            except subprocess.TimeoutExpired:
+                print("[VSF] Command timed out. Falling back to other extraction method.")
+                if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                    self.extract_frame_by_det()
+                else:
+                    self.extract_frame_by_fps()
+                return
+            except Exception as e:
+                print(f"[VSF] Exception occurred: {e}. Falling back to other extraction method.")
+                if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                    self.extract_frame_by_det()
+                else:
+                    self.extract_frame_by_fps()
+                return
+            finally:
+                self.vsf_running = False
         else:
             # 定义执行命令
             cmd = f"{path_vsf} -c -r -i \"{self.video_path}\" -o \"{self.temp_output_dir}\" -ces \"{self.vsf_subtitle}\" "
@@ -455,11 +516,36 @@ class SubtitleExtractor:
             cmd += f"-te {top_end} -be {bottom_end} -le {left_end} -re {right_end} -nthr {cpu_count} -dsi"
             self.vsf_running = True
             import subprocess
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
-                                 close_fds='posix' in sys.builtin_module_names, shell=True)
-            Thread(target=vsf_output, daemon=True, args=(p.stderr,)).start()
-            p.wait()
-            self.vsf_running = False
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
+                                     close_fds='posix' in sys.builtin_module_names, shell=True)
+                Thread(target=vsf_output, daemon=True, args=(p.stderr,)).start()
+                p.wait(timeout=300) # 5分钟超时
+                if p.returncode != 0:
+                    print(f"[VSF] Command failed with return code {p.returncode}")
+                    # Fallback to using other extraction method
+                    if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                        self.extract_frame_by_det()
+                    else:
+                        self.extract_frame_by_fps()
+                    return
+            except subprocess.TimeoutExpired:
+                print("[VSF] Command timed out. Falling back to other extraction method.")
+                p.kill()  # Kill the subprocess
+                if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                    self.extract_frame_by_det()
+                else:
+                    self.extract_frame_by_fps()
+                return
+            except Exception as e:
+                print(f"[VSF] Exception occurred: {e}. Falling back to other extraction method.")
+                if config.USE_GPU and config.MODE_TYPE == 'accurate':
+                    self.extract_frame_by_det()
+                else:
+                    self.extract_frame_by_fps()
+                return
+            finally:
+                self.vsf_running = False
 
     def filter_watermark(self):
         """
@@ -569,11 +655,12 @@ class SubtitleExtractor:
         if os.path.exists(sample_frame_file_path):
             os.remove(sample_frame_file_path)
 
-    def generate_subtitle_file(self):
+    def generate_subtitle_file(self, force_generate=False):
         """
         生成srt格式的字幕文件
         """
-        if not self.use_vsf:
+        # When force_generate is True, we want to run even if VSF was being used
+        if not self.use_vsf or force_generate:
             subtitle_content = self._remove_duplicate_subtitle()
             srt_filename = os.path.join(os.path.splitext(self.video_path)[0] + '.srt')
             # 保存持续时间不足1秒的字幕行，用于后续处理
@@ -598,35 +685,47 @@ class SubtitleExtractor:
     def generate_subtitle_file_vsf(self):
         if not self.use_vsf:
             return
-        subs = pysrt.open(self.vsf_subtitle)
-        sub_no_map = {}
-        for sub in subs:
-            sub.start.no = self._timestamp_to_frameno(sub.start.ordinal)
-            sub_no_map[sub.start.no] = sub
+        # Check if the VSF subtitle file exists before trying to open it
+        if not os.path.exists(self.vsf_subtitle):
+            print(f"[VSF]{config.interface_config['Main']['SubLocation']} could not be created because {self.vsf_subtitle} does not exist. Falling back to regular subtitle generation.")
+            # Fallback to regular subtitle generation if VSF failed to create the file
+            self.generate_subtitle_file(force_generate=True)
+            return
+        
+        try:
+            subs = pysrt.open(self.vsf_subtitle)
+            sub_no_map = {}
+            for sub in subs:
+                sub.start.no = self._timestamp_to_frameno(sub.start.ordinal)
+                sub_no_map[sub.start.no] = sub
 
-        subtitle_content = self._remove_duplicate_subtitle()
-        subtitle_content_start_map = {int(a[0]): a for a in subtitle_content}
-        final_subtitles = []
-        for sub in subs:
-            found = sub.start.no in subtitle_content_start_map
-            if found:
-                subtitle_content_line = subtitle_content_start_map[sub.start.no]
-                sub.text = subtitle_content_line[2]
-                end_no = int(subtitle_content_line[1])
-                sub.end = sub_no_map[end_no].end if end_no in sub_no_map else sub.end
-                sub.index = len(final_subtitles) + 1
-                final_subtitles.append(sub)
+            subtitle_content = self._remove_duplicate_subtitle()
+            subtitle_content_start_map = {int(a[0]): a for a in subtitle_content}
+            final_subtitles = []
+            for sub in subs:
+                found = sub.start.no in subtitle_content_start_map
+                if found:
+                    subtitle_content_line = subtitle_content_start_map[sub.start.no]
+                    sub.text = subtitle_content_line[2]
+                    end_no = int(subtitle_content_line[1])
+                    sub.end = sub_no_map[end_no].end if end_no in sub_no_map else sub.end
+                    sub.index = len(final_subtitles) + 1
+                    final_subtitles.append(sub)
 
-            if not found and not config.DELETE_EMPTY_TIMESTAMP:
-                # 保留时间轴
-                sub.text = ""
-                sub.index = len(final_subtitles) + 1
-                final_subtitles.append(sub)
-                continue
+                if not found and not config.DELETE_EMPTY_TIMESTAMP:
+                    # 保留时间轴
+                    sub.text = ""
+                    sub.index = len(final_subtitles) + 1
+                    final_subtitles.append(sub)
+                    continue
 
-        srt_filename = os.path.join(os.path.splitext(self.video_path)[0] + '.srt')
-        pysrt.SubRipFile(final_subtitles).save(srt_filename, encoding='utf-8')
-        print(f"[VSF]{config.interface_config['Main']['SubLocation']} {srt_filename}")
+            srt_filename = os.path.join(os.path.splitext(self.video_path)[0] + '.srt')
+            pysrt.SubRipFile(final_subtitles).save(srt_filename, encoding='utf-8')
+            print(f"[VSF]{config.interface_config['Main']['SubLocation']} {srt_filename}")
+        except Exception as e:
+            print(f"[VSF] Error processing subtitle file: {e}. Falling back to regular subtitle generation.")
+            # Fallback to regular subtitle generation if VSF processing fails
+            self.generate_subtitle_file(force_generate=True)
 
     def _detect_watermark_area(self):
         """
@@ -1000,12 +1099,18 @@ class SubtitleExtractor:
 
     @staticmethod
     def srt2txt(srt_file):
-        subs = pysrt.open(srt_file, encoding='utf-8')
-        output_path = os.path.join(os.path.dirname(srt_file), Path(srt_file).stem + '.txt')
-        print(output_path)
-        with open(output_path, 'w') as f:
-            for sub in subs:
-                f.write(f'{sub.text}\n')
+        if not os.path.exists(srt_file):
+            print(f"[ERROR] SRT file does not exist: {srt_file}")
+            return
+        try:
+            subs = pysrt.open(srt_file, encoding='utf-8')
+            output_path = os.path.join(os.path.dirname(srt_file), Path(srt_file).stem + '.txt')
+            print(output_path)
+            with open(output_path, 'w') as f:
+                for sub in subs:
+                    f.write(f'{sub.text}\n')
+        except Exception as e:
+            print(f"[ERROR] Failed to convert SRT to TXT: {e}")
 
 
 if __name__ == '__main__':
