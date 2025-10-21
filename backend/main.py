@@ -8,6 +8,7 @@
 import os
 import random
 import shutil
+import subprocess
 from collections import Counter, namedtuple
 import unicodedata
 from threading import Thread
@@ -68,7 +69,8 @@ class SubtitleExtractor:
         self.sub_detector = SubtitleDetect()
         # 视频路径
         self.video_path = vd_path
-        self.video_cap = cv2.VideoCapture(vd_path)
+        # Check if the video can be opened, and if not, try to re-encode it
+        self.video_cap = self._initialize_video_capture(vd_path)
         # 通过视频路径获取视频名称
         self.vd_name = Path(self.video_path).stem
         # 临时存储文件夹
@@ -119,6 +121,100 @@ class SubtitleExtractor:
         self.subtitle_ocr_progress_queue = None
         # vsf运行状态
         self.vsf_running = False
+
+    def _initialize_video_capture(self, vd_path):
+        """
+        Initialize video capture, and if it fails due to AV1 codec error,
+        re-encode the video using ffmpeg.
+        """
+        video_cap = cv2.VideoCapture(vd_path)
+        
+        # Test if video capture is working properly
+        if not video_cap.isOpened():
+            print(f"[ERROR] Could not open video file: {vd_path}")
+            print("[AV1-ERROR-HANDLER] Detected potential AV1 codec error, attempting to re-encode...")
+            # Try re-encoding
+            print(f"Attempting to re-encode video: {vd_path}")
+            re_encoded_path = self._re_encode_video(vd_path)
+            if re_encoded_path:
+                return cv2.VideoCapture(re_encoded_path)
+            else:
+                print("[ERROR] Failed to re-encode video.")
+                return video_cap
+        
+        # Read a test frame to check for errors
+        ret, frame = video_cap.read()
+        if not ret:
+            # If frame read failed, try re-encoding
+            print(f"Failed to read frame from video: {vd_path}")
+            print("[AV1-ERROR-HANDLER] Detected potential AV1 codec error (failed to read frame), attempting to re-encode...")
+            video_cap.release()
+            print(f"Attempting to re-encode video: {vd_path}")
+            re_encoded_path = self._re_encode_video(vd_path)
+            if re_encoded_path:
+                return cv2.VideoCapture(re_encoded_path)
+            else:
+                print("[ERROR] Failed to re-encode video.")
+                return cv2.VideoCapture(vd_path)
+        
+        # Reset the capture to the beginning
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        return video_cap
+
+    def _re_encode_video(self, original_video_path):
+        """
+        Re-encode the video using ffmpeg to handle AV1 codec errors.
+        Uses ffmpeg -i input_video.mp4 -c:v libx264 -c:a copy output_video.mp4
+        """
+        print(f"Re-encoding video: {original_video_path}")
+        
+        # Create temporary path for re-encoded video
+        dir_path = os.path.dirname(original_video_path)
+        file_name = os.path.splitext(os.path.basename(original_video_path))[0]
+        file_ext = os.path.splitext(original_video_path)[1]
+        temp_video_path = os.path.join(dir_path, f"{file_name}_reencoded{file_ext}")
+        
+        # Build ffmpeg command
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-i', original_video_path,
+            '-c:v', 'libx264',
+            '-c:a', 'copy',
+            '-y',  # Overwrite output file if it exists
+            temp_video_path
+        ]
+        
+        try:
+            # Run ffmpeg command
+            result = subprocess.run(
+                ' '.join(ffmpeg_cmd),
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode != 0:
+                print(f"[ERROR] FFmpeg re-encoding failed: {result.stderr.decode()}")
+                return None
+            else:
+                print(f"Successfully re-encoded video: {temp_video_path}")
+                
+                # Replace original video with re-encoded video
+                try:
+                    os.replace(temp_video_path, original_video_path)
+                    print(f"Replaced original video with re-encoded version: {original_video_path}")
+                    return original_video_path
+                except Exception as e:
+                    print(f"[ERROR] Could not replace original video: {e}")
+                    # If we can't replace, return the temporary file
+                    return temp_video_path
+        except subprocess.TimeoutExpired:
+            print("[ERROR] FFmpeg re-encoding timed out.")
+            return None
+        except Exception as e:
+            print(f"[ERROR] Failed to run ffmpeg: {e}")
+            return None
 
     def run(self):
         """
